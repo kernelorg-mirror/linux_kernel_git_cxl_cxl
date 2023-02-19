@@ -215,6 +215,21 @@ struct cxl_event_state {
 	struct mutex log_lock;
 };
 
+
+/*
+ * enum cxl_devtype - delineate type-2 from a generic type-3 device
+ * @CXL_DEVTYPE_DEVMEM - Vendor specific CXL Type-2 device implementing HDM-D or
+ * 			 HDM-DB, no expectation that this device implements a
+ * 			 mailbox, or other memory-device-standard manageability
+ * 			 flows.
+ * @CXL_DEVTYPE_CLASSMEM - Common class definition of a CXL Type-3 device with
+ * 			   HDM-H and class-mandatory memory device registers
+ */
+enum cxl_devtype {
+	CXL_DEVTYPE_DEVMEM,
+	CXL_DEVTYPE_CLASSMEM,
+};
+
 /**
  * struct cxl_dev_state - The driver device state
  *
@@ -233,6 +248,7 @@ struct cxl_event_state {
  * @component_reg_phys: register base of component registers
  * @info: Cached DVSEC information about the device.
  * @serial: PCIe Device Serial Number
+ * @type: Generic Memory Class device or Vendor Specific Memory device
  * @doe_mbs: PCI DOE mailbox array
  */
 struct cxl_dev_state {
@@ -246,6 +262,7 @@ struct cxl_dev_state {
 	struct resource ram_res;
 	resource_size_t component_reg_phys;
 	u64 serial;
+	enum cxl_devtype type;
 	struct xarray doe_mbs;
 };
 
@@ -303,6 +320,8 @@ struct cxl_memdev_state {
 static inline struct cxl_memdev_state *
 to_cxl_memdev_state(struct cxl_dev_state *cxlds)
 {
+	if (cxlds->type != CXL_DEVTYPE_CLASSMEM)
+		return NULL;
 	return container_of(cxlds, struct cxl_memdev_state, cxlds);
 }
 
