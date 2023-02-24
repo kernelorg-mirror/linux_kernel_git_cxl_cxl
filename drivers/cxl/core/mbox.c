@@ -67,6 +67,7 @@ static struct cxl_mem_command cxl_mem_commands[CXL_MEM_COMMAND_ID_MAX] = {
 	CXL_CMD(GET_SCAN_MEDIA_CAPS, 0x10, 0x4, 0),
 	CXL_CMD(SCAN_MEDIA, 0x11, 0, 0),
 	CXL_CMD(GET_SCAN_MEDIA, 0, CXL_VARIABLE_PAYLOAD, 0),
+	CXL_CMD(GET_DC_EXTENT_LIST, 0x8, CXL_VARIABLE_PAYLOAD, 0),
 };
 
 /*
@@ -1356,6 +1357,144 @@ dc_error:
 	return rc;
 }
 EXPORT_SYMBOL_NS_GPL(cxl_dev_dynamic_capacity_identify, CXL);
+
+int cxl_dev_get_dc_extent_cnt(struct cxl_dev_state *cxlds,
+				unsigned int *extent_gen_num)
+{
+	struct device *dev = cxlds->dev;
+	struct cxl_mbox_dc_extents *dc_extents;
+	struct cxl_mbox_get_dc_extent get_dc_extent;
+	unsigned int total_extent_cnt;
+	struct cxl_mbox_cmd mbox_cmd;
+	struct cxl_mem_command *cmd =
+			cxl_mem_find_command(CXL_MBOX_OP_GET_DC_EXTENT_LIST);
+	int rc;
+
+	if (!test_bit(cmd->info.id, cxlds->enabled_cmds)) {
+		dev_dbg(dev, "unsupported cmd : get dyn cap extent list\n");
+		return 0;
+	}
+
+	dc_extents = kvmalloc(cxlds->payload_size, GFP_KERNEL);
+	if (!dc_extents)
+		return -ENOMEM;
+
+	get_dc_extent = (struct cxl_mbox_get_dc_extent) {
+		.extent_cnt = 0,
+		.start_extent_index = 0,
+	};
+
+	mbox_cmd = (struct cxl_mbox_cmd) {
+		.opcode = CXL_MBOX_OP_GET_DC_EXTENT_LIST,
+		.payload_in = &get_dc_extent,
+		.size_in = sizeof(get_dc_extent),
+		.size_out = cxlds->payload_size,
+		.payload_out = dc_extents,
+		.min_out = 1,
+	};
+	rc = cxl_internal_send_cmd(cxlds, &mbox_cmd);
+	if (rc < 0)
+		goto out;
+
+	total_extent_cnt = le32_to_cpu(dc_extents->total_extent_cnt);
+	*extent_gen_num = le32_to_cpu(dc_extents->extent_list_num);
+	dev_dbg(dev, "Total extent count :%d Extent list Generation Num: %d\n",
+			total_extent_cnt, *extent_gen_num);
+out:
+
+	kvfree(dc_extents);
+	if (rc < 0)
+		return rc;
+
+	return total_extent_cnt;
+
+}
+
+EXPORT_SYMBOL_NS_GPL(cxl_dev_get_dc_extent_cnt, CXL);
+
+int cxl_dev_get_dc_extents(struct cxl_dev_state *cxlds,
+				unsigned int index, unsigned int cnt)
+{
+	/* See CXL 3.0 Table 125 dynamic capacity config  Output Payload */
+	struct device *dev = cxlds->dev;
+	struct cxl_mbox_dc_extents *dc_extents;
+	struct cxl_mbox_get_dc_extent get_dc_extent;
+	unsigned int extent_gen_num, available_extents, total_extent_cnt;
+	int rc;
+	struct cxl_dc_extent_data *extent;
+	struct cxl_mbox_cmd mbox_cmd;
+	struct resource alloc_dpa_res;
+	struct cxl_mem_command *cmd =
+			cxl_mem_find_command(CXL_MBOX_OP_GET_DC_EXTENT_LIST);
+
+	if (!test_bit(cmd->info.id, cxlds->enabled_cmds)) {
+		dev_dbg(dev, "unsupported cmd : get dyn cap extent list\n");
+		return 0;
+	}
+
+	dc_extents = kvmalloc(cxlds->payload_size, GFP_KERNEL);
+	if (!dc_extents)
+		return -ENOMEM;
+	get_dc_extent = (struct cxl_mbox_get_dc_extent) {
+		.extent_cnt = cnt,
+		.start_extent_index = index,
+	};
+
+	mbox_cmd = (struct cxl_mbox_cmd) {
+		.opcode = CXL_MBOX_OP_GET_DC_EXTENT_LIST,
+		.payload_in = &get_dc_extent,
+		.size_in = sizeof(get_dc_extent),
+		.size_out = cxlds->payload_size,
+		.payload_out = dc_extents,
+		.min_out = 1,
+	};
+	rc = cxl_internal_send_cmd(cxlds, &mbox_cmd);
+	if (rc < 0)
+		goto out;
+
+	available_extents = le32_to_cpu(dc_extents->ret_extent_cnt);
+	total_extent_cnt = le32_to_cpu(dc_extents->total_extent_cnt);
+	extent_gen_num = le32_to_cpu(dc_extents->extent_list_num);
+	dev_dbg(dev, "No Total extent count :%d Extent list Generation Num:%d\n",
+			total_extent_cnt, extent_gen_num);
+
+
+	for (int i = 0; i < available_extents ; i++) {
+		extent = devm_kzalloc(dev, sizeof(*extent), GFP_KERNEL);
+		if (!extent) {
+			dev_err(dev, "No memory available\n");
+			rc = -ENOMEM;
+			goto out;
+		}
+		extent->dpa_start = le64_to_cpu(dc_extents->extent[i].start_dpa);
+		extent->length = le64_to_cpu(dc_extents->extent[i].length);
+		memcpy(extent->tag, dc_extents->extent[i].tag,
+					sizeof(dc_extents->extent[i].tag));
+		extent->shared_extent_seq =
+				le16_to_cpu(dc_extents->extent[i].shared_extn_seq);
+		dev_dbg(dev, "dynamic capacity extent[%d] DPA:0x%llx LEN:%llx\n",
+				i, extent->dpa_start, extent->length);
+
+		alloc_dpa_res = (struct resource){
+			.start = extent->dpa_start,
+			.end = extent->dpa_start + extent->length - 1,
+		};
+
+		rc = cxl_add_dc_extent(cxlds, &alloc_dpa_res);
+		if (rc < 0)
+			goto out;
+		rc = xa_insert(&cxlds->dc_extent_list, extent->dpa_start, extent,
+				GFP_KERNEL);
+	}
+
+out:
+	kvfree(dc_extents);
+	if (rc < 0)
+		return rc;
+
+	return available_extents;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_dev_get_dc_extents, CXL);
 
 static int add_dpa_res(struct device *dev, struct resource *parent,
 		       struct resource *res, resource_size_t start,

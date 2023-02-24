@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright(c) 2022 Intel Corporation. All rights reserved. */
 #include <linux/memregion.h>
+#include <linux/interrupt.h>
 #include <linux/genalloc.h>
 #include <linux/device.h>
 #include <linux/module.h>
@@ -166,6 +167,38 @@ endpoint_reset:
 	}
 
 	return 0;
+}
+
+static int cxl_region_manage_dc(struct cxl_region *cxlr)
+{
+	struct cxl_region_params *p = &cxlr->params;
+	unsigned int extent_gen_num;
+	int i, rc;
+
+	/* Designed for Non Interleaving flow with the assumption one
+	 * cxl_region will map the complete device DC region's DPA range */
+	for (i = 0; i < p->nr_targets; i++) {
+		struct cxl_endpoint_decoder *cxled = p->targets[i];
+		struct cxl_memdev *cxlmd = cxled_to_memdev(cxled);
+		struct cxl_dev_state *cxlds = cxlmd->cxlds;
+
+		rc = cxl_dev_get_dc_extent_cnt(cxlds, &extent_gen_num);
+		if (rc < 0)
+			goto err;
+		else if (rc > 1) {
+			rc = cxl_dev_get_dc_extents(cxlds, rc, 0);
+			if (rc < 0)
+				goto err;
+			cxlds->num_dc_extents = rc;
+			cxlds->dc_extents_index = rc - 1;
+		}
+		cxlds->dc_list_gen_num = extent_gen_num;
+		dev_dbg(cxlds->dev, "No of preallocated extents :%d\n", rc);
+		enable_irq(cxlds->cxl_irq[CXL_EVENT_TYPE_DCD]);
+	}
+	return 0;
+err:
+	return rc;
 }
 
 static int commit_decoder(struct cxl_decoder *cxld)
@@ -1699,6 +1732,9 @@ static int cxl_region_detach(struct cxl_endpoint_decoder *cxled)
 {
 	struct cxl_port *iter, *ep_port = cxled_to_port(cxled);
 	struct cxl_region *cxlr = cxled->cxld.region;
+	struct cxl_memdev *cxlmd = cxled_to_memdev(cxled);
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+
 	struct cxl_region_params *p;
 	int rc = 0;
 
@@ -1709,6 +1745,10 @@ static int cxl_region_detach(struct cxl_endpoint_decoder *cxled)
 
 	p = &cxlr->params;
 	get_device(&cxlr->dev);
+
+	if (cxlr->mode == CXL_DECODER_DC) {
+		disable_irq(cxlds->cxl_irq[CXL_EVENT_TYPE_DCD]);
+	}
 
 	if (p->state > CXL_CONFIG_ACTIVE) {
 		/*
@@ -2544,11 +2584,14 @@ static int devm_cxl_add_dc_region(struct cxl_region *cxlr)
 		return PTR_ERR(cxlr_dax);
 
 	cxlr_dc = kzalloc(sizeof(*cxlr_dc), GFP_KERNEL);
-	if (!cxlr_dc) {
-		rc = -ENOMEM;
-		goto err;
-	}
+	if (!cxlr_dc)
+		return -ENOMEM;
 
+	rc = request_module("dax_cxl");
+	if (rc) {
+		dev_err(dev, "failed to load dax-ctl module\n");
+		goto load_err;
+	}
 	dev = &cxlr_dax->dev;
 	rc = dev_set_name(dev, "dax_region%d", cxlr->id);
 	if (rc)
@@ -2570,10 +2613,24 @@ static int devm_cxl_add_dc_region(struct cxl_region *cxlr)
 	xa_init(&cxlr_dc->dax_dev_list);
 	cxlr->cxlr_dc = cxlr_dc;
 	rc = devm_add_action_or_reset(&cxlr->dev, cxl_dc_region_release, cxlr);
-	if (!rc)
-		return 0;
-err:
+	if (rc)
+		goto err;
+
+	if (!dev->driver) {
+		dev_err(dev, "%s Driver not attached\n", dev_name(dev));
+		rc = -ENXIO;
+		goto err;
+	}
+
+	rc = cxl_region_manage_dc(cxlr);
+	if (rc)
+		goto err;
+
+	return 0;
+
+err :
 	put_device(dev);
+load_err :
 	kfree(cxlr_dc);
 	return rc;
 }

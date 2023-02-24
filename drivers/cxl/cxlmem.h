@@ -323,9 +323,11 @@ struct cxl_dev_state {
 		u32 dsmad_handle;
 		u8 flags;
 	} dc_region[CXL_MAX_DC_REGION];
+
+	u32 dc_list_gen_num;
+	u32 dc_extents_index;
 	struct xarray dc_extent_list;
 	u32 num_dc_extents;
-
 	size_t dc_event_log_size;
 	resource_size_t component_reg_phys;
 	u64 serial;
@@ -631,6 +633,19 @@ struct cxl_mbox_dynamic_capacity {
 #define  CXL_SET_PARTITION_IMMEDIATE_FLAG	BIT(0)
 #define CXL_DYNAMIC_CAPACITY_SANITIZE_ON_RELEASE_FLAG BIT(0)
 
+struct cxl_mbox_get_dc_extent {
+	__le32 extent_cnt;
+	__le32 start_extent_index;
+} __packed;
+
+struct cxl_mbox_dc_extents {
+	__le32 ret_extent_cnt;
+	__le32 total_extent_cnt;
+	__le32 extent_list_num;
+	u8 rsvd[4];
+	struct cxl_dc_extent extent[];
+}  __packed;
+
 /* Set Timestamp CXL 3.0 Spec 8.2.9.4.2 */
 struct cxl_mbox_set_timestamp_in {
 	__le64 timestamp;
@@ -704,6 +719,10 @@ int cxl_await_media_ready(struct cxl_dev_state *cxlds);
 int cxl_enumerate_cmds(struct cxl_dev_state *cxlds);
 int cxl_handle_dcd_event_records(struct cxl_dev_state *cxlds,
 				struct cxl_event_record_raw *rec);
+int cxl_dev_get_dc_extent_cnt(struct cxl_dev_state *cxlds,
+		unsigned int *extent_gen_num);
+int cxl_dev_get_dc_extents(struct cxl_dev_state *cxlds,
+		unsigned int cnt, unsigned int index);
 int cxl_mem_create_range_info(struct cxl_dev_state *cxlds);
 struct cxl_dev_state *cxl_dev_state_create(struct device *dev);
 void set_exclusive_cxl_commands(struct cxl_dev_state *cxlds, unsigned long *cmds);
