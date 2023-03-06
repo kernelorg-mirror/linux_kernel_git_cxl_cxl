@@ -4,8 +4,10 @@
 #include <linux/seq_file.h>
 #include <linux/device.h>
 #include <linux/delay.h>
+#include <linux/pci.h>
 
 #include "cxlmem.h"
+#include "cxlpci.h"
 #include "core.h"
 
 /**
