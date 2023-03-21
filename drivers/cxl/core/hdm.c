@@ -826,12 +826,22 @@ static int init_hdm_decoder(struct cxl_port *port, struct cxl_decoder *cxld,
 		}
 		port->commit_end = cxld->id;
 	} else {
-		/* unless / until type-2 drivers arrive, assume type-3 */
 		if (FIELD_GET(CXL_HDM_DECODER0_CTRL_TYPE, ctrl) == 0) {
 			ctrl |= CXL_HDM_DECODER0_CTRL_TYPE;
 			writel(ctrl, hdm + CXL_HDM_DECODER0_CTRL_OFFSET(which));
 		}
-		cxld->target_type = CXL_DECODER_HOSTMEM;
+		if (cxled) {
+			struct cxl_memdev *cxlmd = cxled_to_memdev(cxled);
+			struct cxl_dev_state *cxlds = cxlmd->cxlds;
+
+			if (cxlds->type == CXL_DEVTYPE_CLASSMEM)
+				cxld->target_type = CXL_DECODER_HOSTMEM;
+			else
+				cxld->target_type = CXL_DECODER_DEVMEM;
+		} else {
+			/* To be overridden by region type at commit time */
+			cxld->target_type = CXL_DECODER_HOSTMEM;
+		}
 	}
 	rc = eiw_to_ways(FIELD_GET(CXL_HDM_DECODER0_CTRL_IW_MASK, ctrl),
 			  &cxld->interleave_ways);
