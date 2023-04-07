@@ -313,7 +313,9 @@ static int __cxl_dpa_reserve(struct cxl_endpoint_decoder *cxled,
 	cxled->dpa_res = res;
 	cxled->skip = skipped;
 
-	if (resource_contains(&cxlds->pmem_res, res))
+	if (resource_contains(&cxlds->dc_res, res))
+		cxled->mode = CXL_DECODER_DC;
+	else if (resource_contains(&cxlds->pmem_res, res))
 		cxled->mode = CXL_DECODER_PMEM;
 	else if (resource_contains(&cxlds->ram_res, res))
 		cxled->mode = CXL_DECODER_RAM;
@@ -417,6 +419,7 @@ int cxl_dpa_set_mode(struct cxl_endpoint_decoder *cxled,
 	switch (mode) {
 	case CXL_DECODER_RAM:
 	case CXL_DECODER_PMEM:
+	case CXL_DECODER_DC:
 		break;
 	default:
 		dev_dbg(dev, "unsupported mode: %d\n", mode);
@@ -443,6 +446,11 @@ int cxl_dpa_set_mode(struct cxl_endpoint_decoder *cxled,
 		rc = -ENXIO;
 		goto out;
 	}
+	if (mode == CXL_DECODER_DC && !resource_size(&cxlds->dc_res)) {
+		dev_dbg(dev, "no available dynamic capacity\n");
+		rc = -ENXIO;
+		goto out;
+	}
 
 	cxled->mode = mode;
 	rc = 0;
@@ -455,7 +463,7 @@ out:
 int cxl_dpa_alloc(struct cxl_endpoint_decoder *cxled, unsigned long long size)
 {
 	struct cxl_memdev *cxlmd = cxled_to_memdev(cxled);
-	resource_size_t free_ram_start, free_pmem_start;
+	resource_size_t free_ram_start, free_pmem_start, free_dc_start;
 	struct cxl_port *port = cxled_to_port(cxled);
 	struct cxl_dev_state *cxlds = cxlmd->cxlds;
 	struct device *dev = &cxled->cxld.dev;
@@ -491,6 +499,13 @@ int cxl_dpa_alloc(struct cxl_endpoint_decoder *cxled, unsigned long long size)
 	else
 		free_pmem_start = cxlds->pmem_res.start;
 
+	for (p = cxlds->dc_res.child, last = NULL; p; p = p->sibling)
+		last = p;
+	if (last)
+		free_dc_start = last->end + 1;
+	else
+		free_dc_start = cxlds->dc_res.start;
+
 	if (cxled->mode == CXL_DECODER_RAM) {
 		start = free_ram_start;
 		avail = cxlds->ram_res.end - start + 1;
@@ -512,6 +527,25 @@ int cxl_dpa_alloc(struct cxl_endpoint_decoder *cxled, unsigned long long size)
 		else
 			skip_end = start - 1;
 		skip = skip_end - skip_start + 1;
+	} else if (cxled->mode == CXL_DECODER_DC) {
+		resource_size_t skip_start, skip_end;
+
+		start = free_dc_start;
+		avail = cxlds->dc_res.end - start + 1;
+		if ((resource_size(&cxlds->pmem_res) == 0) || !cxlds->pmem_res.child)
+			skip_start = free_ram_start;
+		else
+			skip_start = free_pmem_start;
+		/*
+		 * If some dc is already allocated, then that allocation
+		 * already handled the skip.
+		 */
+		if (cxlds->dc_res.child &&
+		    skip_start == cxlds->dc_res.child->start)
+			skip_end = skip_start - 1;
+		else
+			skip_end = start - 1;
+		skip = skip_end - skip_start + 1;
 	} else {
 		dev_dbg(dev, "mode not set\n");
 		rc = -EINVAL;
@@ -519,9 +553,15 @@ int cxl_dpa_alloc(struct cxl_endpoint_decoder *cxled, unsigned long long size)
 	}
 
 	if (size > avail) {
+		static const char * const names[] = {
+			[CXL_DECODER_NONE] = "none",
+			[CXL_DECODER_RAM] = "ram",
+			[CXL_DECODER_PMEM] = "pmem",
+			[CXL_DECODER_MIXED] = "mixed",
+			[CXL_DECODER_DC] = "dc",
+		};
 		dev_dbg(dev, "%pa exceeds available %s capacity: %pa\n", &size,
-			cxled->mode == CXL_DECODER_RAM ? "ram" : "pmem",
-			&avail);
+			names[cxled->mode], &avail);
 		rc = -ENOSPC;
 		goto out;
 	}

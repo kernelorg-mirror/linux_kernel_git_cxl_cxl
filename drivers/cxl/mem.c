@@ -76,10 +76,18 @@ static int devm_cxl_add_endpoint(struct device *host, struct cxl_memdev *cxlmd,
 			&cxlmd->dev, parent_dport->rcrb, CXL_RCRB_UPSTREAM);
 	else
 		component_reg_phys = cxlds->component_reg_phys;
+
 	endpoint = devm_cxl_add_port(host, &cxlmd->dev, component_reg_phys,
 				     parent_dport);
 	if (IS_ERR(endpoint))
 		return PTR_ERR(endpoint);
+
+	if (resource_size(&cxlds->dc_res)) {
+		for (iter = endpoint; !is_cxl_root(iter);
+		     iter = to_cxl_port(iter->dev.parent))
+			;
+		device_for_each_child(&iter->dev, NULL, add_dc_region_attribute);
+	}
 
 	rc = cxl_endpoint_autoremove(cxlmd, endpoint);
 	if (rc)

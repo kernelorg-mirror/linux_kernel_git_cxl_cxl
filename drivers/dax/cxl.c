@@ -28,6 +28,10 @@ static int cxl_dax_region_probe(struct device *dev)
 		.id = -1,
 		.size = range_len(&cxlr_dax->hpa_range),
 	};
+
+	if (cxlr->mode == CXL_DECODER_DC)
+		return 0;
+
 	dev_dax = devm_create_dev_dax(&data);
 	if (IS_ERR(dev_dax))
 		return PTR_ERR(dev_dax);

@@ -196,6 +196,8 @@ static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
 		mode = CXL_DECODER_PMEM;
 	else if (sysfs_streq(buf, "ram"))
 		mode = CXL_DECODER_RAM;
+	else if (sysfs_streq(buf, "dc"))
+		mode = CXL_DECODER_DC;
 	else
 		return -EINVAL;
 
@@ -300,6 +302,27 @@ static struct attribute *cxl_decoder_root_attrs[] = {
 	SET_CXL_REGION_ATTR(delete_region)
 	NULL,
 };
+
+int add_dc_region_attribute(struct device *dev, void *data)
+{
+	struct cxl_root_decoder *cxlrd;
+
+	if (!is_root_decoder(dev))
+		return 0;
+
+	cxlrd = to_cxl_root_decoder(dev);
+	if (!cxlrd->dc_sysfs_initialized) {
+		if (sysfs_add_file_to_group(&dev->kobj,
+				&dev_attr_create_dc_region.attr, NULL)) {
+			dev_err(dev, "Failed to create_dc_region file\n");
+			cxlrd->dc_sysfs_initialized = true;
+			return 1;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(add_dc_region_attribute, CXL);
 
 static bool can_create_pmem(struct cxl_root_decoder *cxlrd)
 {

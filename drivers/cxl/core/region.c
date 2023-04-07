@@ -2038,6 +2038,7 @@ static struct cxl_region *devm_cxl_add_region(struct cxl_root_decoder *cxlrd,
 	switch (mode) {
 	case CXL_DECODER_RAM:
 	case CXL_DECODER_PMEM:
+	case CXL_DECODER_DC:
 		break;
 	default:
 		dev_err(&cxlrd->cxlsd.cxld.dev, "unsupported mode %d\n", mode);
@@ -2084,6 +2085,12 @@ static ssize_t create_pmem_region_show(struct device *dev,
 }
 
 static ssize_t create_ram_region_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	return __create_region_show(to_cxl_root_decoder(dev), buf);
+}
+
+static ssize_t create_dc_region_show(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
 	return __create_region_show(to_cxl_root_decoder(dev), buf);
@@ -2145,6 +2152,26 @@ static ssize_t create_ram_region_store(struct device *dev,
 	return len;
 }
 DEVICE_ATTR_RW(create_ram_region);
+
+static ssize_t create_dc_region_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t len)
+{
+	struct cxl_root_decoder *cxlrd = to_cxl_root_decoder(dev);
+	struct cxl_region *cxlr;
+	int rc, id;
+
+	rc = sscanf(buf, "region%d\n", &id);
+	if (rc != 1)
+		return -EINVAL;
+
+	cxlr = __create_region(cxlrd, CXL_DECODER_DC, id);
+	if (IS_ERR(cxlr))
+		return PTR_ERR(cxlr);
+
+	return len;
+}
+DEVICE_ATTR_RW(create_dc_region);
 
 static ssize_t region_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
@@ -2494,6 +2521,61 @@ err:
 	return rc;
 }
 
+static void cxl_dc_region_release(void *data)
+{
+	struct cxl_region *cxlr = data;
+	struct cxl_dc_region *cxlr_dc = cxlr->cxlr_dc;
+
+	xa_destroy(&cxlr_dc->dax_dev_list);
+	kfree(cxlr_dc);
+}
+
+static int devm_cxl_add_dc_region(struct cxl_region *cxlr)
+{
+	struct cxl_dc_region *cxlr_dc;
+	struct cxl_dax_region *cxlr_dax;
+	struct device *dev;
+	int rc = 0;
+
+	cxlr_dax = cxl_dax_region_alloc(cxlr);
+	if (IS_ERR(cxlr_dax))
+		return PTR_ERR(cxlr_dax);
+
+	cxlr_dc = kzalloc(sizeof(*cxlr_dc), GFP_KERNEL);
+	if (!cxlr_dc) {
+		rc = -ENOMEM;
+		goto err;
+	}
+
+	dev = &cxlr_dax->dev;
+	rc = dev_set_name(dev, "dax_region%d", cxlr->id);
+	if (rc)
+		goto err;
+
+	rc = device_add(dev);
+	if (rc)
+		goto err;
+
+	dev_dbg(&cxlr->dev, "%s: register %s\n", dev_name(dev->parent),
+		dev_name(dev));
+
+	rc = devm_add_action_or_reset(&cxlr->dev, cxlr_dax_unregister,
+					cxlr_dax);
+	if (rc)
+		goto err;
+
+	cxlr_dc->cxlr_dax = cxlr_dax;
+	xa_init(&cxlr_dc->dax_dev_list);
+	cxlr->cxlr_dc = cxlr_dc;
+	rc = devm_add_action_or_reset(&cxlr->dev, cxl_dc_region_release, cxlr);
+	if (!rc)
+		return 0;
+err:
+	put_device(dev);
+	kfree(cxlr_dc);
+	return rc;
+}
+
 static int match_decoder_by_range(struct device *dev, void *data)
 {
 	struct range *r1, *r2 = data;
@@ -2712,6 +2794,19 @@ static int is_system_ram(struct resource *res, void *arg)
 	return 1;
 }
 
+/*
+ * The region can not be manged by CXL if any portion of
+ * it is already online as 'System RAM'
+ */
+static bool region_is_system_ram(struct cxl_region *cxlr,
+				 struct cxl_region_params *p)
+{
+	return (walk_iomem_res_desc(IORES_DESC_NONE,
+				    IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY,
+				    p->res->start, p->res->end, cxlr,
+				    is_system_ram) > 0);
+}
+
 static int cxl_region_probe(struct device *dev)
 {
 	struct cxl_region *cxlr = to_cxl_region(dev);
@@ -2746,16 +2841,13 @@ out:
 	case CXL_DECODER_PMEM:
 		return devm_cxl_add_pmem_region(cxlr);
 	case CXL_DECODER_RAM:
-		/*
-		 * The region can not be manged by CXL if any portion of
-		 * it is already online as 'System RAM'
-		 */
-		if (walk_iomem_res_desc(IORES_DESC_NONE,
-					IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY,
-					p->res->start, p->res->end, cxlr,
-					is_system_ram) > 0)
+		if (region_is_system_ram(cxlr, p))
 			return 0;
 		return devm_cxl_add_dax_region(cxlr);
+	case CXL_DECODER_DC:
+		if (region_is_system_ram(cxlr, p))
+			return 0;
+		return devm_cxl_add_dc_region(cxlr);
 	default:
 		dev_dbg(&cxlr->dev, "unsupported region mode: %d\n",
 			cxlr->mode);

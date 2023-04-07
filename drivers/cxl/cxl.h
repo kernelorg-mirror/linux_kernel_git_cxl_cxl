@@ -335,6 +335,7 @@ enum cxl_decoder_mode {
 	CXL_DECODER_NONE,
 	CXL_DECODER_RAM,
 	CXL_DECODER_PMEM,
+	CXL_DECODER_DC,
 	CXL_DECODER_MIXED,
 	CXL_DECODER_DEAD,
 };
@@ -346,6 +347,7 @@ static inline const char *cxl_decoder_mode_name(enum cxl_decoder_mode mode)
 		[CXL_DECODER_RAM] = "ram",
 		[CXL_DECODER_PMEM] = "pmem",
 		[CXL_DECODER_MIXED] = "mixed",
+		[CXL_DECODER_DC] = "dc",
 	};
 
 	if (mode >= CXL_DECODER_NONE && mode <= CXL_DECODER_MIXED)
@@ -419,6 +421,7 @@ struct cxl_root_decoder {
 	cxl_calc_hb_fn calc_hb;
 	void *platform_data;
 	struct mutex range_lock;
+	bool dc_sysfs_initialized;
 	struct cxl_switch_decoder cxlsd;
 };
 
@@ -475,6 +478,11 @@ struct cxl_region_params {
  */
 #define CXL_REGION_F_AUTO 1
 
+struct cxl_dc_region {
+	struct xarray dax_dev_list;
+	struct cxl_dax_region *cxlr_dax;
+};
+
 /**
  * struct cxl_region - CXL region
  * @dev: This region's device
@@ -493,6 +501,7 @@ struct cxl_region {
 	enum cxl_decoder_type type;
 	struct cxl_nvdimm_bridge *cxl_nvb;
 	struct cxl_pmem_region *cxlr_pmem;
+	struct cxl_dc_region *cxlr_dc;
 	unsigned long flags;
 	struct cxl_region_params params;
 };
@@ -659,6 +668,7 @@ struct cxl_port *devm_cxl_add_port(struct device *host, struct device *uport,
 				   resource_size_t component_reg_phys,
 				   struct cxl_dport *parent_dport);
 struct cxl_port *find_cxl_root(struct cxl_port *port);
+int add_dc_region_attribute(struct device *dev, void *data);
 int devm_cxl_enumerate_ports(struct cxl_memdev *cxlmd);
 void cxl_bus_rescan(void);
 void cxl_bus_drain(void);
