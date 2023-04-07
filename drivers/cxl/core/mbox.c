@@ -1005,7 +1005,7 @@ int cxl_dev_state_identify(struct cxl_dev_state *cxlds)
 	if (rc < 0)
 		return rc;
 
-	cxlds->total_bytes =
+	cxlds->total_static_capacity =
 		le64_to_cpu(id.total_capacity) * CXL_CAPACITY_MULTIPLIER;
 	cxlds->volatile_only_bytes =
 		le64_to_cpu(id.volatile_capacity) * CXL_CAPACITY_MULTIPLIER;
@@ -1016,10 +1016,134 @@ int cxl_dev_state_identify(struct cxl_dev_state *cxlds)
 
 	cxlds->lsa_size = le32_to_cpu(id.lsa_size);
 	memcpy(cxlds->firmware_version, id.fw_revision, sizeof(id.fw_revision));
+	cxlds->dc_event_log_size = le16_to_cpu(id.dc_event_log_size);
 
 	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(cxl_dev_state_identify, CXL);
+
+/**
+ * cxl_dev_dynamic_capacity_identify() - Reads the dynamic capacity
+ * information from the device.
+ * @cxlds: The device data for the operation
+ * Return: 0 if identify was executed successfully.
+ *
+ * This will dispatch the get_dynamic_capacity command to the device
+ * and on success populate structures to be exported to sysfs.
+ */
+int cxl_dev_dynamic_capacity_identify(struct cxl_dev_state *cxlds)
+{
+	struct device *dev = cxlds->dev;
+	struct cxl_mbox_dynamic_capacity *dc;
+	struct cxl_mbox_get_dc_config get_dc;
+	struct cxl_mbox_cmd mbox_cmd;
+	u64 next_dc_region_start;
+	int rc;
+	struct cxl_mem_command *cmd =
+		cxl_mem_find_command(CXL_MBOX_OP_GET_DC_CONFIG);
+
+	/* Check GET_DC_CONFIG is supported by device */
+	if (!test_bit(cmd->info.id, cxlds->enabled_cmds)) {
+		dev_dbg(dev, "unsupported cmd: get_dynamic_capacity_config\n");
+		return 0;
+	}
+
+	dc = kvmalloc(cxlds->payload_size, GFP_KERNEL);
+	if (!dc)
+		return -ENOMEM;
+
+	get_dc = (struct cxl_mbox_get_dc_config) {
+		.region_count = CXL_MAX_DC_REGION,
+		.start_region_index = 0,
+	};
+
+	mbox_cmd = (struct cxl_mbox_cmd) {
+		.opcode = CXL_MBOX_OP_GET_DC_CONFIG,
+		.payload_in = &get_dc,
+		.size_in = sizeof(get_dc),
+		.size_out = cxlds->payload_size,
+		.payload_out = dc,
+		.min_out = 1,
+	};
+	rc = cxl_internal_send_cmd(cxlds, &mbox_cmd);
+	if (rc < 0)
+		goto dc_error;
+
+	cxlds->nr_dc_region = dc->avail_region_count;
+
+	if (cxlds->nr_dc_region < 1 ||
+	    cxlds->nr_dc_region > CXL_MAX_DC_REGION) {
+		dev_err(dev, "Invalid num of dynamic capacity regions %d\n",
+			cxlds->nr_dc_region);
+		rc = -EINVAL;
+		goto dc_error;
+	}
+
+	for (int i = 0; i < cxlds->nr_dc_region; i++) {
+		struct cxl_dc_region_info *dcr = &cxlds->dc_region[i];
+
+		dcr->base = le64_to_cpu(dc->region[i].region_base);
+		dcr->decode_len =
+			le64_to_cpu(dc->region[i].region_decode_length);
+		dcr->decode_len *= CXL_CAPACITY_MULTIPLIER;
+		dcr->len = le64_to_cpu(dc->region[i].region_length);
+		dcr->blk_size = le64_to_cpu(dc->region[i].region_block_size);
+
+		/* Check regions are in increasing DPA order */
+		if ((i + 1) < cxlds->nr_dc_region) {
+			next_dc_region_start =
+				le64_to_cpu(dc->region[i + 1].region_base);
+			if ((dcr->base > next_dc_region_start) ||
+			    ((dcr->base + dcr->decode_len) > next_dc_region_start)) {
+				dev_err(dev,
+					"DPA ordering violation for DC region %d and %d\n",
+					i, i + 1);
+				rc = -EINVAL;
+				goto dc_error;
+			}
+		}
+
+		/* Check the region is 256 MB aligned */
+		if (!IS_ALIGNED(dcr->base, SZ_256M)) {
+			dev_err(dev, "DC region %d not aligned to 256MB\n", i);
+			rc = -EINVAL;
+			goto dc_error;
+		}
+
+		/* Check Region base and length are aligned to block size */
+		if (!IS_ALIGNED(dcr->base, dcr->blk_size) ||
+		    !IS_ALIGNED(dcr->len, dcr->blk_size)) {
+			dev_err(dev, "DC region %d not aligned to %#llx\n", i,
+				dcr->blk_size);
+			rc = -EINVAL;
+			goto dc_error;
+		}
+
+		dcr->dsmad_handle =
+			le32_to_cpu(dc->region[i].region_dsmad_handle);
+		dcr->flags = dc->region[i].flags;
+
+		dev_dbg(dev,
+			"DC region %d DPA: %#llx LEN: %#llx BLKSZ: %#llx\n", i,
+			dcr->base, dcr->decode_len, dcr->blk_size);
+	}
+
+	/* 
+	 * Calculate entire DPA range of all configured regions which will be mapped by
+	 * one or more HDM decoders
+	 */
+	cxlds->total_dynamic_capacity =
+		cxlds->dc_region[cxlds->nr_dc_region - 1].base +
+		cxlds->dc_region[cxlds->nr_dc_region - 1].decode_len -
+		cxlds->dc_region[0].base;
+	dev_dbg(dev, "Total dynamic capacity: %#llx\n",
+		cxlds->total_dynamic_capacity);
+
+dc_error:
+	kvfree(dc);
+	return rc;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_dev_dynamic_capacity_identify, CXL);
 
 static int add_dpa_res(struct device *dev, struct resource *parent,
 		       struct resource *res, resource_size_t start,
@@ -1051,15 +1175,26 @@ int cxl_mem_create_range_info(struct cxl_dev_state *cxlds)
 {
 	struct device *dev = cxlds->dev;
 	int rc;
+	size_t untenanted_mem =
+		cxlds->dc_region[0].base - cxlds->total_static_capacity;
+
+	cxlds->total_capacity = cxlds->total_static_capacity +
+			untenanted_mem + cxlds->total_dynamic_capacity;
 
 	cxlds->dpa_res =
-		(struct resource)DEFINE_RES_MEM(0, cxlds->total_bytes);
+		(struct resource)DEFINE_RES_MEM(0, cxlds->total_capacity);
+	rc = add_dpa_res(dev, &cxlds->dpa_res, &cxlds->dc_res,
+			 cxlds->dc_region[0].base,
+			 cxlds->total_dynamic_capacity, "dc");
+	if (rc)
+		return rc;
 
 	if (cxlds->partition_align_bytes == 0) {
 		rc = add_dpa_res(dev, &cxlds->dpa_res, &cxlds->ram_res, 0,
 				 cxlds->volatile_only_bytes, "ram");
 		if (rc)
 			return rc;
+
 		return add_dpa_res(dev, &cxlds->dpa_res, &cxlds->pmem_res,
 				   cxlds->volatile_only_bytes,
 				   cxlds->persistent_only_bytes, "pmem");
