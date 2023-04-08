@@ -434,7 +434,7 @@ static void free_dev_dax_ranges(struct dev_dax *dev_dax)
 		trim_dev_dax_range(dev_dax);
 }
 
-static void unregister_dev_dax(void *dev)
+void unregister_dev_dax(void *dev)
 {
 	struct dev_dax *dev_dax = to_dev_dax(dev);
 
@@ -445,6 +445,7 @@ static void unregister_dev_dax(void *dev)
 	free_dev_dax_ranges(dev_dax);
 	put_device(dev);
 }
+EXPORT_SYMBOL_GPL(unregister_dev_dax);
 
 /* a return value >= 0 indicates this invocation invalidated the id */
 static int __free_dev_dax_id(struct dev_dax *dev_dax)
@@ -641,7 +642,7 @@ static void dax_mapping_release(struct device *dev)
 	kfree(mapping);
 }
 
-static void unregister_dax_mapping(void *data)
+void unregister_dax_mapping(void *data)
 {
 	struct device *dev = data;
 	struct dax_mapping *mapping = to_dax_mapping(dev);
@@ -658,7 +659,7 @@ static void unregister_dax_mapping(void *data)
 	device_del(dev);
 	put_device(dev);
 }
-
+EXPORT_SYMBOL_GPL(unregister_dax_mapping);
 static struct dev_dax_range *get_dax_range(struct device *dev)
 {
 	struct dax_mapping *mapping = to_dax_mapping(dev);
@@ -793,7 +794,7 @@ static int devm_register_dax_mapping(struct dev_dax *dev_dax, int range_id)
 	return 0;
 }
 
-static int alloc_dev_dax_range(struct dev_dax *dev_dax, u64 start,
+int alloc_dev_dax_range(struct dev_dax *dev_dax, u64 start,
 		resource_size_t size)
 {
 	struct dax_region *dax_region = dev_dax->region;
@@ -853,6 +854,8 @@ static int alloc_dev_dax_range(struct dev_dax *dev_dax, u64 start,
 
 	return rc;
 }
+EXPORT_SYMBOL_GPL(alloc_dev_dax_range);
+
 
 static int adjust_dev_dax_range(struct dev_dax *dev_dax, struct resource *res, resource_size_t size)
 {

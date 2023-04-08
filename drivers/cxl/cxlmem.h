@@ -5,6 +5,7 @@
 #include <uapi/linux/cxl_mem.h>
 #include <linux/cdev.h>
 #include <linux/uuid.h>
+#include <linux/xarray.h>
 #include "cxl.h"
 
 /* CXL 2.0 8.2.8.5.1.1 Memory Device Status Register */
@@ -204,6 +205,7 @@ struct cxl_event_interrupt_policy {
 	u8 warn_settings;
 	u8 failure_settings;
 	u8 fatal_settings;
+	u8 dyncap_settings;
 } __packed;
 
 /**
@@ -215,6 +217,25 @@ struct cxl_event_interrupt_policy {
 struct cxl_event_state {
 	struct cxl_get_event_payload *buf;
 	struct mutex log_lock;
+};
+
+struct cxl_dc_extent_data {
+	u64 dpa_start;
+	u64 length;
+	u8 tag[16];
+	u16 shared_extent_seq;
+};
+
+/*
+ * CXL rev 3.0 section 8.2.9.2.2; Table 8-49
+ */
+enum cxl_event_log_type {
+	CXL_EVENT_TYPE_INFO = 0x00,
+	CXL_EVENT_TYPE_WARN,
+	CXL_EVENT_TYPE_FAIL,
+	CXL_EVENT_TYPE_FATAL,
+	CXL_EVENT_TYPE_DCD,
+	CXL_EVENT_TYPE_MAX
 };
 
 /**
@@ -302,6 +323,8 @@ struct cxl_dev_state {
 		u32 dsmad_handle;
 		u8 flags;
 	} dc_region[CXL_MAX_DC_REGION];
+	struct xarray dc_extent_list;
+	u32 num_dc_extents;
 
 	size_t dc_event_log_size;
 	resource_size_t component_reg_phys;
@@ -310,6 +333,7 @@ struct cxl_dev_state {
 	struct xarray doe_mbs;
 
 	struct cxl_event_state event;
+	unsigned int cxl_irq[CXL_EVENT_TYPE_MAX];
 
 	int (*mbox_send)(struct cxl_dev_state *cxlds, struct cxl_mbox_cmd *cmd);
 };
@@ -362,6 +386,17 @@ enum cxl_opcode {
 #define DEFINE_CXL_VENDOR_DEBUG_UUID                                           \
 	UUID_INIT(0xe1819d9, 0x11a9, 0x400c, 0x81, 0x1f, 0xd6, 0x07, 0x19,     \
 		  0x40, 0x3d, 0x86)
+
+
+struct cxl_mbox_dc_response {
+	__le32 extent_list_size;
+	u8 reserved[4];
+	struct updated_extent_list {
+		__le64 dpa_start;
+		__le64 length;
+		u8 reserved[8];
+	} __packed extent_list[];
+} __packed;
 
 struct cxl_mbox_get_supported_logs {
 	__le16 entries;
@@ -440,16 +475,6 @@ struct cxl_get_event_payload {
 	struct cxl_event_record_raw records[];
 } __packed;
 
-/*
- * CXL rev 3.0 section 8.2.9.2.2; Table 8-49
- */
-enum cxl_event_log_type {
-	CXL_EVENT_TYPE_INFO = 0x00,
-	CXL_EVENT_TYPE_WARN,
-	CXL_EVENT_TYPE_FAIL,
-	CXL_EVENT_TYPE_FATAL,
-	CXL_EVENT_TYPE_MAX
-};
 
 /*
  * Clear Event Records input payload
@@ -530,6 +555,35 @@ struct cxl_event_mem_module {
 	u8 event_type;
 	struct cxl_get_health_info info;
 	u8 reserved[0x3d];
+} __packed;
+
+/*
+ * Dynamic Capacity Event Record
+ * CXL rev 3.0 section 8.2.9.2.1.5; Table 8-47
+ */
+
+#define CXL_EVENT_DC_TAG_SIZE	0x10
+struct cxl_dc_extent {
+	__le64 start_dpa;
+	__le64 length;
+	u8 tag[CXL_EVENT_DC_TAG_SIZE];
+	__le16 shared_extn_seq;
+	u8 reserved[6];
+} __packed;
+
+struct dcd_record_data {
+	u8 event_type;
+	u8 reserved;
+	__le16 host_id;
+	u8 region_index;
+	u8 reserved1[3];
+	struct cxl_dc_extent extent;
+	u8 reserved2[32];
+} __packed;
+
+struct dcd_event_dyn_cap {
+	struct cxl_event_record_hdr hdr;
+	struct dcd_record_data data;
 } __packed;
 
 struct cxl_mbox_get_partition_info {
@@ -648,6 +702,8 @@ int cxl_dev_state_identify(struct cxl_dev_state *cxlds);
 int cxl_dev_dynamic_capacity_identify(struct cxl_dev_state *cxlds);
 int cxl_await_media_ready(struct cxl_dev_state *cxlds);
 int cxl_enumerate_cmds(struct cxl_dev_state *cxlds);
+int cxl_handle_dcd_event_records(struct cxl_dev_state *cxlds,
+				struct cxl_event_record_raw *rec);
 int cxl_mem_create_range_info(struct cxl_dev_state *cxlds);
 struct cxl_dev_state *cxl_dev_state_create(struct device *dev);
 void set_exclusive_cxl_commands(struct cxl_dev_state *cxlds, unsigned long *cmds);

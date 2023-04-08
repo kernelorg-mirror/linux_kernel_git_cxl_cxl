@@ -57,6 +57,8 @@ int cxl_dpa_set_mode(struct cxl_endpoint_decoder *cxled,
 		     enum cxl_decoder_mode mode);
 int cxl_dpa_alloc(struct cxl_endpoint_decoder *cxled, unsigned long long size);
 int cxl_dpa_free(struct cxl_endpoint_decoder *cxled);
+int cxl_add_dc_extent(struct cxl_dev_state *cxlds, struct resource *alloc_dpa_res);
+int cxl_release_dc_extent(struct cxl_dev_state *cxlds, struct resource *rel_dpa_res);
 resource_size_t cxl_dpa_size(struct cxl_endpoint_decoder *cxled);
 resource_size_t cxl_dpa_resource_start(struct cxl_endpoint_decoder *cxled);
 extern struct rw_semaphore cxl_dpa_rwsem;

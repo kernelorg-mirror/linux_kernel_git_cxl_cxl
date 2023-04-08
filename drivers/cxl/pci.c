@@ -543,7 +543,8 @@ static irqreturn_t cxl_event_thread(int irq, void *id)
 	return IRQ_HANDLED;
 }
 
-static int cxl_event_req_irq(struct cxl_dev_state *cxlds, u8 setting)
+static int cxl_event_req_irq(struct cxl_dev_state *cxlds, u8 setting,
+		enum cxl_event_log_type type, unsigned long irqflags)
 {
 	struct device *dev = cxlds->dev;
 	struct pci_dev *pdev = to_pci_dev(dev);
@@ -564,9 +565,10 @@ static int cxl_event_req_irq(struct cxl_dev_state *cxlds, u8 setting)
 	if (irq < 0)
 		return irq;
 
+	cxlds->cxl_irq[type] = irq;
+
 	return devm_request_threaded_irq(dev, irq, NULL, cxl_event_thread,
-					 IRQF_SHARED | IRQF_ONESHOT, NULL,
-					 dev_id);
+							irqflags, NULL, dev_id);
 }
 
 static int cxl_event_get_int_policy(struct cxl_dev_state *cxlds,
@@ -598,6 +600,7 @@ static int cxl_event_config_msgnums(struct cxl_dev_state *cxlds,
 		.warn_settings = CXL_INT_MSI_MSIX,
 		.failure_settings = CXL_INT_MSI_MSIX,
 		.fatal_settings = CXL_INT_MSI_MSIX,
+		.dyncap_settings = CXL_INT_MSI_MSIX,
 	};
 
 	mbox_cmd = (struct cxl_mbox_cmd) {
@@ -626,30 +629,41 @@ static int cxl_event_irqsetup(struct cxl_dev_state *cxlds)
 	if (rc)
 		return rc;
 
-	rc = cxl_event_req_irq(cxlds, policy.info_settings);
+	rc = cxl_event_req_irq(cxlds, policy.info_settings, CXL_EVENT_TYPE_INFO,
+					IRQF_SHARED | IRQF_ONESHOT);
 	if (rc) {
 		dev_err(cxlds->dev, "Failed to get interrupt for event Info log\n");
 		return rc;
 	}
 
-	rc = cxl_event_req_irq(cxlds, policy.warn_settings);
+	rc = cxl_event_req_irq(cxlds, policy.warn_settings, CXL_EVENT_TYPE_WARN,
+					IRQF_SHARED | IRQF_ONESHOT);
 	if (rc) {
 		dev_err(cxlds->dev, "Failed to get interrupt for event Warn log\n");
 		return rc;
 	}
 
-	rc = cxl_event_req_irq(cxlds, policy.failure_settings);
+	rc = cxl_event_req_irq(cxlds, policy.failure_settings, CXL_EVENT_TYPE_FAIL,
+					IRQF_SHARED | IRQF_ONESHOT);
 	if (rc) {
 		dev_err(cxlds->dev, "Failed to get interrupt for event Failure log\n");
 		return rc;
 	}
 
-	rc = cxl_event_req_irq(cxlds, policy.fatal_settings);
+	rc = cxl_event_req_irq(cxlds, policy.fatal_settings, CXL_EVENT_TYPE_FATAL,
+					IRQF_SHARED | IRQF_ONESHOT);
 	if (rc) {
 		dev_err(cxlds->dev, "Failed to get interrupt for event Fatal log\n");
 		return rc;
 	}
 
+	/* Driver enables DCD interrupt after creating the dc cxl_region */
+	rc = cxl_event_req_irq(cxlds, policy.dyncap_settings, CXL_EVENT_TYPE_DCD,
+					IRQF_SHARED | IRQF_ONESHOT | IRQF_NO_AUTOEN);
+	if (rc) {
+		dev_err(cxlds->dev, "Failed to get interrupt for event dc log\n");
+		return rc;
+	}
 	return 0;
 }
 

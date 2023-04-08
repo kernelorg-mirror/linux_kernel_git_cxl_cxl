@@ -47,8 +47,11 @@ int __dax_driver_register(struct dax_device_driver *dax_drv,
 	__dax_driver_register(driver, THIS_MODULE, KBUILD_MODNAME)
 void dax_driver_unregister(struct dax_device_driver *dax_drv);
 void kill_dev_dax(struct dev_dax *dev_dax);
+void unregister_dev_dax(void *dev);
+void unregister_dax_mapping(void *data);
 bool static_dev_dax(struct dev_dax *dev_dax);
-
+int alloc_dev_dax_range(struct dev_dax *dev_dax, u64 start,
+					resource_size_t size);
 /*
  * While run_dax() is potentially a generic operation that could be
  * defined in include/linux/dax.h we don't want to grow any users

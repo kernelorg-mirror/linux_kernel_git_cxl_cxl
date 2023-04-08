@@ -11,6 +11,8 @@
 #include <cxlmem.h>
 #include <cxl.h>
 #include "core.h"
+#include "../../dax/bus.h"
+#include "../../dax/dax-private.h"
 
 /**
  * DOC: cxl core region
@@ -2606,6 +2608,155 @@ static int match_region_by_range(struct device *dev, void *data)
 	if (p->res && p->res->start == r->start && p->res->end == r->end)
 		rc = 1;
 	up_read(&cxl_region_rwsem);
+
+	return rc;
+}
+
+static int match_ep_decoder_by_range(struct device *dev, void *data)
+{
+	struct cxl_endpoint_decoder *cxled;
+	struct resource *dpa_res = data;
+
+	if (!is_endpoint_decoder(dev))
+		return 0;
+
+	cxled = to_cxl_endpoint_decoder(dev);
+	if (!cxled->cxld.region)
+		return 0;
+
+	if (cxled->dpa_res->start <= dpa_res->start &&
+				cxled->dpa_res->end >= dpa_res->end)
+		return 1;
+
+	return 0;
+}
+
+int cxl_release_dc_extent(struct cxl_dev_state *cxlds,
+			  struct resource *rel_dpa_res)
+{
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct cxl_endpoint_decoder *cxled;
+	struct cxl_dc_region *cxlr_dc;
+	struct dax_region *dax_region;
+	resource_size_t dpa_offset;
+	struct cxl_region *cxlr;
+	struct range hpa_range;
+	struct dev_dax *dev_dax;
+	resource_size_t hpa;
+	struct device *dev;
+	int ranges, rc = 0;
+
+	/*
+	 * Find the cxl endpoind decoder with which has the extent dpa range and
+	 * get the cxl_region, dax_region refrences.
+	 */
+	dev = device_find_child(&cxlmd->endpoint->dev, rel_dpa_res,
+				match_ep_decoder_by_range);
+	if (!dev) {
+		dev_err(cxlds->dev, "%pr not mapped\n",	rel_dpa_res);
+		return PTR_ERR(dev);
+	}
+
+	cxled = to_cxl_endpoint_decoder(dev);
+	hpa_range = cxled->cxld.hpa_range;
+	cxlr = cxled->cxld.region;
+	cxlr_dc = cxlr->cxlr_dc;
+
+	/* DPA to HPA translation */
+	if (cxled->cxld.interleave_ways == 1) {
+		dpa_offset = rel_dpa_res->start - cxled->dpa_res->start;
+		hpa = hpa_range.start + dpa_offset;
+	} else {
+		dev_err(cxlds->dev, "Interleaving DC not supported\n");
+		return -EINVAL;
+	}
+
+	dev_dax = xa_load(&cxlr_dc->dax_dev_list, hpa);
+	if (!dev_dax)
+		return -EINVAL;
+
+	dax_region = dev_dax->region;
+	ranges = dev_dax->nr_range;
+
+	while (ranges) {
+		int i = ranges - 1;
+		struct dax_mapping *mapping = dev_dax->ranges[i].mapping;
+
+		devm_release_action(dax_region->dev, unregister_dax_mapping,
+								&mapping->dev);
+		ranges--;
+	}
+
+	dev_dbg(cxlds->dev, "removing devdax device:%s\n",
+						dev_name(&dev_dax->dev));
+	devm_release_action(dax_region->dev, unregister_dev_dax,
+							&dev_dax->dev);
+	xa_erase(&cxlr_dc->dax_dev_list, hpa);
+
+	return rc;
+}
+
+int cxl_add_dc_extent(struct cxl_dev_state *cxlds, struct resource *alloc_dpa_res)
+{
+	struct dev_dax_data data;
+	struct dev_dax *dev_dax;
+	struct cxl_endpoint_decoder *cxled;
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev;
+	struct range hpa_range;
+	struct cxl_region *cxlr;
+	struct cxl_dc_region *cxlr_dc;
+	struct cxl_dax_region *cxlr_dax;
+	struct dax_region *dax_region;
+	resource_size_t dpa_offset;
+	resource_size_t hpa;
+	int rc;
+
+	/*
+	 * Find the cxl endpoind decoder with which has the extent dpa range and
+	 * get the cxl_region, dax_region refrences.
+	 */
+	dev = device_find_child(&cxlmd->endpoint->dev, alloc_dpa_res,
+				match_ep_decoder_by_range);
+	if (!dev) {
+		dev_err(cxlds->dev, "%pr not mapped\n",	alloc_dpa_res);
+		return PTR_ERR(dev);
+	}
+
+	cxled = to_cxl_endpoint_decoder(dev);
+	hpa_range = cxled->cxld.hpa_range;
+	cxlr = cxled->cxld.region;
+	cxlr_dc = cxlr->cxlr_dc;
+	cxlr_dax = cxlr_dc->cxlr_dax;
+	dax_region = dev_get_drvdata(&cxlr_dax->dev);
+
+	/* DPA to HPA translation */
+	if (cxled->cxld.interleave_ways == 1) {
+		dpa_offset = alloc_dpa_res->start - cxled->dpa_res->start;
+		hpa = hpa_range.start + dpa_offset;
+	} else {
+		dev_err(cxlds->dev, "Interleaving DC not supported\n");
+		return -EINVAL;
+	}
+
+	data = (struct dev_dax_data) {
+		.dax_region = dax_region,
+		.id = -1,
+		.size = 0,
+	};
+
+	dev_dax = devm_create_dev_dax(&data);
+	if (IS_ERR(dev_dax))
+		return PTR_ERR(dev_dax);
+
+	if (IS_ALIGNED(resource_size(alloc_dpa_res), max_t(unsigned long,
+				dev_dax->align, memremap_compat_align()))) {
+		rc = alloc_dev_dax_range(dev_dax, hpa,
+					resource_size(alloc_dpa_res));
+		return rc;
+	}
+
+	rc = xa_insert(&cxlr_dc->dax_dev_list, hpa, dev_dax, GFP_KERNEL);
 
 	return rc;
 }
