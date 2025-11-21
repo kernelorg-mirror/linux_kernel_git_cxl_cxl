@@ -298,21 +298,22 @@ TRACE_EVENT(non_standard_event,
 
 TRACE_EVENT(aer_event,
 	TP_PROTO(const char *dev_name,
-		 const char *bus_type,
 		 const u32 status,
 		 const u8 severity,
 		 const u8 tlp_header_valid,
-		 struct pcie_tlp_log *tlp),
+		 struct pcie_tlp_log *tlp,
+		 const char *bus_type),
 
-	TP_ARGS(dev_name, bus_type, status, severity, tlp_header_valid, tlp),
+
+	TP_ARGS(dev_name, status, severity, tlp_header_valid, tlp, bus_type),
 
 	TP_STRUCT__entry(
 		__string(	dev_name,	dev_name	)
-		__string(	bus_type,	bus_type	)
 		__field(	u32,		status		)
 		__field(	u8,		severity	)
 		__field(	u8, 		tlp_header_valid)
 		__array(	u32, 		tlp_header, PCIE_STD_MAX_TLP_HEADERLOG)
+		__string(	bus_type,	bus_type	)
 	),
 
 	TP_fast_assign(

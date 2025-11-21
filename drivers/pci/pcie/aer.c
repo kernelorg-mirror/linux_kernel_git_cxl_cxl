@@ -878,8 +878,8 @@ void aer_print_error(struct aer_err_info *info, int i)
 	id = pci_dev_id(dev);
 
 	pci_dev_aer_stats_incr(dev, info);
-	trace_aer_event(pci_name(dev), bus_type, (info->status & ~info->mask),
-			info->severity, info->tlp_header_valid, &info->tlp);
+	trace_aer_event(pci_name(dev), (info->status & ~info->mask),
+			info->severity, info->tlp_header_valid, &info->tlp, bus_type);
 
 	if (!info->ratelimit_print[i])
 		return;
@@ -954,8 +954,8 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity,
 	bus_type = aer_err_bus(&info);
 
 	pci_dev_aer_stats_incr(dev, &info);
-	trace_aer_event(pci_name(dev), bus_type, (status & ~mask),
-			aer_severity, tlp_header_valid, &aer->header_log);
+	trace_aer_event(pci_name(dev), (status & ~mask), aer_severity,
+			tlp_header_valid, &aer->header_log, bus_type);
 
 	if (!aer_ratelimit(dev, info.severity))
 		return;
